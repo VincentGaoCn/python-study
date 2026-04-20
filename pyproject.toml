@@ -1,0 +1,7 @@
+[project]
+name = "python-start"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = [
+    "markitdown[all]>=0.1.5",
+]

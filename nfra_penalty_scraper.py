@@ -1,8 +1,13 @@
 #!/usr/bin/env python
 # -*- coding:utf-8 -*-
 """
-国家金融监督管理总局 - 派出机构行政处罚数据爬虫
-目标: https://www.nfra.gov.cn/cn/view/pages/ItemList.html?itemPId=923&itemId=4293&itemsubPId=931
+国家金融监督管理总局 - 行政处罚数据爬虫
+支持: 派出机构 (itemId=4293) / 总局机关 (itemId=4113)
+
+用法:
+  uv run python nfra_penalty_scraper.py --item=派出机构 --test
+  uv run python nfra_penalty_scraper.py --item=总局机关 --clean --pages=10
+  uv run python nfra_penalty_scraper.py --item=总局机关
 
 表格有两种典型格式:
   5列: 序号, 当事人名称, 主要违法违规行为, 行政处罚内容, 作出决定机关
@@ -24,14 +29,48 @@ from tqdm import tqdm
 
 # ============ 配置 ============
 
-ITEM_ID = "4293"  # 派出机构
-PAGE_SIZE = 100   # 增大页面大小, 减少请求总数
-OUTPUT_FILE = "nfra_派出机构_行政处罚.xlsx"
+# 支持的爬取项目
+ITEM_CONFIGS = {
+    "派出机构": {
+        "item_id": "4293",
+        "output_file": "nfra_派出机构_行政处罚.xlsx",
+        "cache_subdir": "_cache_派出机构",
+        "default_max_pages": 179,
+        "referer_item_name": "%E6%B4%BE%E5%87%BA%E6%9C%BA%E6%9E%84",
+        "referer_item_id": "4293",
+    },
+    "总局机关": {
+        "item_id": "4113",
+        "output_file": "nfra_总局机关_行政处罚.xlsx",
+        "cache_subdir": "_cache_总局机关",
+        "default_max_pages": 999,  # 自动按实际页数
+        "referer_item_name": "%E6%80%BB%E5%B1%80%E6%9C%BA%E5%85%B3",
+        "referer_item_id": "4113",
+    },
+}
 
-# 中间缓存文件
-CACHE_DIR = Path(__file__).parent / "_cache"
+# 当前运行配置 (由 main 入口设置)
+ITEM_ID = "4293"
+PAGE_SIZE = 100
+OUTPUT_FILE = "nfra_派出机构_行政处罚.xlsx"
+DEFAULT_MAX_PAGES = 179
+
+# 中间缓存文件 (由 apply_item_config 动态设置)
+CACHE_DIR = Path(__file__).parent / "_cache_派出机构"
 DOC_LIST_CACHE = CACHE_DIR / "doc_list.json"
 DETAIL_CACHE = CACHE_DIR / "detail_cache.json"
+
+
+def apply_item_config(item_name: str):
+    """应用指定项目的配置"""
+    global ITEM_ID, OUTPUT_FILE, DEFAULT_MAX_PAGES, CACHE_DIR, DOC_LIST_CACHE, DETAIL_CACHE
+    cfg = ITEM_CONFIGS[item_name]
+    ITEM_ID = cfg["item_id"]
+    OUTPUT_FILE = cfg["output_file"]
+    DEFAULT_MAX_PAGES = cfg["default_max_pages"]
+    CACHE_DIR = Path(__file__).parent / cfg["cache_subdir"]
+    DOC_LIST_CACHE = CACHE_DIR / "doc_list.json"
+    DETAIL_CACHE = CACHE_DIR / "detail_cache.json"
 
 # 请求延迟配置 (秒) - 模拟人工浏览
 DELAY_MIN = 2.0       # 正常请求最小间隔
@@ -53,7 +92,7 @@ USER_AGENTS = [
 # API 地址
 LIST_API = "https://www.nfra.gov.cn/cbircweb/DocInfo/SelectDocByItemIdAndChild"
 DETAIL_API_TEMPLATE = "https://www.nfra.gov.cn/cn/static/data/DocInfo/SelectByDocId/data_docId={doc_id}.json"
-DETAIL_URL_TEMPLATE = "https://www.nfra.gov.cn/cn/view/pages/governmentDetail.html?docId={doc_id}&itemId=4293&generaltype=1"
+DETAIL_URL_TEMPLATE = "https://www.nfra.gov.cn/cn/view/pages/governmentDetail.html?docId={doc_id}&itemId={item_id}&generaltype=1"
 
 
 # ============ 智能请求器 ============
@@ -82,10 +121,9 @@ class SmartRequester:
             "Connection": "keep-alive",
             "Host": "www.nfra.gov.cn",
             "Pragma": "no-cache",
-            "Referer": "https://www.nfra.gov.cn/cn/view/pages/ItemList.html?"
-                       "itemPId=923&itemId=4293&itemUrl=ItemListRightList.html"
-                       "&itemName=%E6%B4%BE%E5%87%BA%E6%9C%BA%E6%9E%84"
-                       "&itemsubPId=931&itemsubPName=%E8%A1%8C%E6%94%BF%E5%A4%84%E7%BD%9A",
+            "Referer": f"https://www.nfra.gov.cn/cn/view/pages/ItemList.html?"
+                       f"itemPId=923&itemId={ITEM_ID}&itemUrl=ItemListRightList.html"
+                       f"&itemsubPId=931&itemsubPName=%E8%A1%8C%E6%94%BF%E5%A4%84%E7%BD%9A",
             "X-Requested-With": "XMLHttpRequest",
             "User-Agent": random.choice(USER_AGENTS),
         }
@@ -191,13 +229,10 @@ def get_total_count() -> int:
     return total
 
 
-DEFAULT_MAX_PAGES = 179  # 默认最大爬取页数
-
-
-def fetch_doc_list(max_pages: int = DEFAULT_MAX_PAGES) -> list[dict]:
-    """抓取文档列表, 支持缓存
-    :param max_pages: 最大爬取页数, 默认179页
-    """
+def fetch_doc_list(max_pages: int = None) -> list[dict]:
+    """抓取文档列表, 支持缓存"""
+    if max_pages is None:
+        max_pages = DEFAULT_MAX_PAGES
     cached = load_doc_list_cache()
     if cached:
         return cached
@@ -649,7 +684,7 @@ def parse_penalty_table(html_content: str, doc_id: int) -> list[dict]:
     if not html_content:
         return []
 
-    source_url = DETAIL_URL_TEMPLATE.format(doc_id=doc_id)
+    source_url = DETAIL_URL_TEMPLATE.format(doc_id=doc_id, item_id=ITEM_ID)
 
     try:
         tables = pd.read_html(StringIO(html_content))
@@ -695,7 +730,7 @@ def parse_standard_table(table: pd.DataFrame, doc_id: int) -> list[dict]:
     第一行是表头 (当事人名称, 主要违法违规行为, 行政处罚内容, 作出决定机关 等),
     后续每一行是一条处罚记录。
     """
-    source_url = DETAIL_URL_TEMPLATE.format(doc_id=doc_id)
+    source_url = DETAIL_URL_TEMPLATE.format(doc_id=doc_id, item_id=ITEM_ID)
     nrows, ncols = table.shape
 
     if ncols < 3:
@@ -752,7 +787,7 @@ def try_split_combined_party(row_data: dict, doc_id: int) -> list[dict] | None:
     if len(parts) < 2:
         return None
 
-    source_url = DETAIL_URL_TEMPLATE.format(doc_id=doc_id)
+    source_url = DETAIL_URL_TEMPLATE.format(doc_id=doc_id, item_id=ITEM_ID)
     records = []
 
     # 提取机构名 ("及"之前的部分)
@@ -862,7 +897,7 @@ def try_split_combined_party(row_data: dict, doc_id: int) -> list[dict] | None:
 
 def build_standard_record(row_data: dict, doc_id: int) -> dict:
     """从行数据构建标准记录"""
-    source_url = DETAIL_URL_TEMPLATE.format(doc_id=doc_id)
+    source_url = DETAIL_URL_TEMPLATE.format(doc_id=doc_id, item_id=ITEM_ID)
     party_name = row_data.get("当事人名称", "")
 
     record = {
@@ -888,7 +923,7 @@ def build_standard_record(row_data: dict, doc_id: int) -> dict:
 
 def parse_kv_table(table: pd.DataFrame, doc_id: int) -> dict | None:
     """解析两列键值对格式的表格"""
-    source_url = DETAIL_URL_TEMPLATE.format(doc_id=doc_id)
+    source_url = DETAIL_URL_TEMPLATE.format(doc_id=doc_id, item_id=ITEM_ID)
     kv = {}
     for _, row in table.iterrows():
         key = clean_text(row.iloc[0])
@@ -917,7 +952,7 @@ def parse_kv_table(table: pd.DataFrame, doc_id: int) -> dict | None:
 
 def parse_non_table_html(html_content: str, doc_id: int) -> list[dict]:
     """处理非表格型的 HTML 内容 (处罚决定书等纯文本)"""
-    source_url = DETAIL_URL_TEMPLATE.format(doc_id=doc_id)
+    source_url = DETAIL_URL_TEMPLATE.format(doc_id=doc_id, item_id=ITEM_ID)
 
     text = re.sub(r'<[^>]+>', '\n', html_content)
     text = re.sub(r'\n+', '\n', text).strip()
@@ -948,13 +983,12 @@ def parse_non_table_html(html_content: str, doc_id: int) -> list[dict]:
 
 # ============ 主流程 ============
 
-def scrape_penalties(test_mode: bool = False, test_pages: int = 1, max_pages: int = DEFAULT_MAX_PAGES):
+def scrape_penalties(test_mode: bool = False, test_pages: int = 1, max_pages: int = None):
     """
     主爬取函数, 支持断点续爬。
-    :param test_mode: 测试模式
-    :param test_pages: 测试模式下爬取的页数
-    :param max_pages: 最大爬取页数, 默认179页
     """
+    if max_pages is None:
+        max_pages = DEFAULT_MAX_PAGES
     ensure_cache_dir()
 
     # 第一步: 获取文档列表
@@ -1016,7 +1050,7 @@ def scrape_penalties(test_mode: bool = False, test_pages: int = 1, max_pages: in
             records = parse_penalty_table(html_content, int(doc_id))
 
             if not records:
-                source_url = DETAIL_URL_TEMPLATE.format(doc_id=doc_id)
+                source_url = DETAIL_URL_TEMPLATE.format(doc_id=doc_id, item_id=ITEM_ID)
                 records = [{
                     "处罚决定书文号": "",
                     "当事人名称": "",
@@ -1080,8 +1114,10 @@ def scrape_penalties(test_mode: bool = False, test_pages: int = 1, max_pages: in
     return result_df
 
 
-def save_to_excel(df: pd.DataFrame, filename: str = OUTPUT_FILE):
+def save_to_excel(df: pd.DataFrame, filename: str = None):
     """保存到 Excel"""
+    if filename is None:
+        filename = OUTPUT_FILE
     output_path = Path(__file__).parent / filename
     df.to_excel(output_path, index=False, engine="openpyxl")
     print(f"\n已保存到: {output_path}")
@@ -1095,6 +1131,17 @@ if __name__ == "__main__":
 
     test = "--test" in sys.argv
     clean_cache = "--clean" in sys.argv
+
+    # 解析 --item=名称 参数
+    item_name = "派出机构"  # 默认
+    for arg in sys.argv:
+        if arg.startswith("--item="):
+            item_name = arg.split("=", 1)[1]
+    if item_name not in ITEM_CONFIGS:
+        print(f"无效的项目名称: {item_name}, 可选: {', '.join(ITEM_CONFIGS.keys())}")
+        sys.exit(1)
+    apply_item_config(item_name)
+    print(f">>> 爬取项目: {item_name} (itemId={ITEM_ID}) <<<")
 
     # 解析 --pages=N 参数
     max_pages = DEFAULT_MAX_PAGES
